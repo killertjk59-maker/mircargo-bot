@@ -15,8 +15,13 @@ for _part in _admin_raw.split(","):
 # Рақами пардохт (метавонед аз Railway Variables иваз кунед)
 PAYMENT_NUMBER = os.environ.get("PAYMENT_NUMBER", "989091111")
 
-# Юзернейми admin барои тамос
-ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "@Tajwaycargo")
+BOT_NAME = "Tezcargo"
+
+# Юзернейми воқеии admin; агар холӣ бошад, бот тугмаи тамосро пешниҳод мекунад.
+ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "").strip()
+
+# Метавонед баъдтар аз Admin Panel пайванди Instagram-ро гузоред.
+INSTAGRAM_URL = os.environ.get("INSTAGRAM_URL", "").strip()
 
 # Нархи пешфарз барои 1 кг (сомонӣ)
 DEFAULT_PRICE_PER_KG = os.environ.get("PRICE_PER_KG", "25")
