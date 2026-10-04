@@ -13,9 +13,9 @@ T = {
         "en": "✅ Language set to English.",
     },
     "ask_contact": {
-        "tj": "👋 Хуш омадед ба TAJWAY CARGO!\n\nБарои идома додан, лутфан рақами телефони худро тавассути тугмаи поён фиристед.",
-        "ru": "👋 Добро пожаловать в TAJWAY CARGO!\n\nЧтобы продолжить, отправьте свой номер телефона через кнопку ниже.",
-        "en": "👋 Welcome to TAJWAY CARGO!\n\nTo continue, please share your phone number using the button below.",
+        "tj": "👋 Хуш омадед ба Tezcargo!\n\nБарои идома додан, лутфан рақами телефони худро тавассути тугмаи поён фиристед.",
+        "ru": "👋 Добро пожаловать в Tezcargo!\n\nЧтобы продолжить, отправьте свой номер телефона через кнопку ниже.",
+        "en": "👋 Welcome to Tezcargo!\n\nTo continue, please share your phone number using the button below.",
     },
     "btn_share_contact": {
         "tj": "📱 Ирсоли рақами телефон",
@@ -33,9 +33,9 @@ T = {
         "en": "✅ You have been registered successfully!\n\nYou can now use the bot's features.",
     },
     "main_menu": {
-        "tj": "📋 Менюи асосӣ:",
-        "ru": "📋 Главное меню:",
-        "en": "📋 Main menu:",
+        "tj": "📋 Tezcargo — менюи асосӣ:",
+        "ru": "📋 Tezcargo — главное меню:",
+        "en": "📋 Tezcargo — main menu:",
     },
     "btn_search_track": {
         "tj": "🔍 Ҷустуҷӯи трек",
@@ -77,6 +77,31 @@ T = {
         "ru": "🌐 Язык",
         "en": "🌐 Language",
     },
+    "btn_instagram": {
+        "tj": "📷 Instagram",
+        "ru": "📷 Instagram",
+        "en": "📷 Instagram",
+    },
+    "instagram_intro": {
+        "tj": "📷 Tezcargo дар Instagram. Барои кушодани саҳифа тугмаи поёнро пахш кунед:",
+        "ru": "📷 Tezcargo в Instagram. Нажмите кнопку ниже, чтобы открыть страницу:",
+        "en": "📷 Tezcargo on Instagram. Tap below to open the page:",
+    },
+    "btn_open_instagram": {
+        "tj": "📷 Кушодани Instagram",
+        "ru": "📷 Открыть Instagram",
+        "en": "📷 Open Instagram",
+    },
+    "instagram_unavailable": {
+        "tj": "⏳ Пайванди Instagram ҳоло гузошта нашудааст. Админ онро ба зудӣ илова мекунад.",
+        "ru": "⏳ Ссылка на Instagram пока не настроена. Администратор добавит её позже.",
+        "en": "⏳ The Instagram link has not been configured yet. An admin will add it later.",
+    },
+    "admin_contact_fallback": {
+        "tj": "тавассути тугмаи «💬 Тамос бо админ»",
+        "ru": "через кнопку «💬 Связаться с админом»",
+        "en": "using the 💬 Contact admin button",
+    },
     "ask_track_code": {
         "tj": "✏️ Трек-кодро нависед:",
         "ru": "✏️ Напишите трек-код:",
@@ -101,6 +126,16 @@ T = {
         "tj": "Дар роҳ 🚚",
         "ru": "В пути 🚚",
         "en": "On the way 🚚",
+    },
+    "status_arrived": {
+        "tj": "Бор расид 📦 (Интизори гирифтани муштарӣ)",
+        "ru": "Груз прибыл 📦 (Ожидает получения)",
+        "en": "Parcel arrived 📦 (Awaiting collection)",
+    },
+    "status_collected": {
+        "tj": "Ба муштарӣ дода шуд ✅",
+        "ru": "Выдано получателю ✅",
+        "en": "Collected by the recipient ✅",
     },
     "my_tracks_empty": {
         "tj": "📦 Шумо то ҳол ҳеҷ трек кодеро ҷустуҷӯ накардаед.",
