@@ -1,7 +1,11 @@
 # -*- coding: utf-8 -*-
+import logging
+import re
 import time
 import datetime
 import uuid
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+
 import requests
 
 import config
@@ -10,19 +14,43 @@ from texts import t
 import keyboards as kb
 import reports
 from domain import (CARGO_STATUS_KEYS, format_money, normalize_instagram_url,
-                    normalize_track_code, parse_money)
+                    normalize_phone, normalize_track_code, parse_money)
 
 # ============ Telegram API helpers ============
+
+logger = logging.getLogger(__name__)
+
 
 def api(method, params=None, files=None):
     url = f"{config.API_URL}/{method}"
     try:
-        r = requests.post(url, json=params if not files else None,
-                           data=params if files else None, files=files, timeout=40 if method == "getUpdates" else 30)
-        return r.json()
-    except Exception as e:
-        print(f"[API ERROR] {method}: {type(e).__name__}")
-        return {}
+        response = requests.post(url, json=params if not files else None,
+                                 data=params if files else None, files=files,
+                                 timeout=40 if method == "getUpdates" else 30)
+        try:
+            result = response.json()
+        except ValueError:
+            logger.error("Telegram API %s returned non-JSON (HTTP %s)", method, response.status_code)
+            return {"ok": False, "error_code": response.status_code,
+                    "description": "Telegram returned a non-JSON response"}
+        if not isinstance(result, dict):
+            logger.error("Telegram API %s returned an unexpected response (HTTP %s)",
+                         method, response.status_code)
+            return {"ok": False, "error_code": response.status_code,
+                    "description": "Unexpected Telegram API response"}
+        if not response.ok:
+            result["ok"] = False
+            result.setdefault("error_code", response.status_code)
+        if not result.get("ok"):
+            logger.warning("Telegram API %s failed (HTTP %s): %s", method, response.status_code,
+                           result.get("description", "unknown error"))
+        return result
+    except requests.RequestException as error:
+        logger.warning("Telegram API %s transport error: %s", method, type(error).__name__)
+        return {"ok": False, "description": type(error).__name__, "retryable": True}
+    except Exception as error:
+        logger.error("Unexpected Telegram API error in %s (%s)", method, type(error).__name__)
+        return {"ok": False, "description": type(error).__name__}
 
 
 def send_message(chat_id, text, reply_markup=None):
@@ -48,8 +76,11 @@ def answer_callback(callback_id, text=None, show_alert=False):
 
 
 def get_updates(offset):
-    r = api("getUpdates", {"offset": offset, "timeout": 30})
-    return r.get("result", [])
+    result = api("getUpdates", {"offset": offset, "timeout": 30})
+    if not result.get("ok"):
+        raise RuntimeError(f"getUpdates failed: {result.get('description', 'unknown Telegram API error')}")
+    updates = result.get("result", [])
+    return updates if isinstance(updates, list) else []
 
 
 # ============ In-memory state ============
@@ -59,15 +90,23 @@ FORWARD_MAP = {}         # (admin_chat_id, message_id) -> user_id  (for contact-
 
 
 def set_state(user_id, action, data=None):
-    USER_STATE[user_id] = {"action": action, "data": data or {}}
+    state = {"action": action, "data": data or {}}
+    USER_STATE[user_id] = state
+    db.save_conversation_state(user_id, state["action"], state["data"])
 
 
 def clear_state(user_id):
     USER_STATE.pop(user_id, None)
+    db.clear_conversation_state(user_id)
 
 
 def get_state(user_id):
-    return USER_STATE.get(user_id)
+    state = USER_STATE.get(user_id)
+    if state is None:
+        state = db.get_conversation_state(user_id)
+        if state:
+            USER_STATE[user_id] = state
+    return state
 
 
 # ============ Helpers ============
@@ -88,8 +127,76 @@ def notify_admins(text, reply_markup=None):
     return sent
 
 
+def _retryable_api_failure(result):
+    if not isinstance(result, dict):
+        return True
+    if result.get("retryable"):
+        return True
+    code = result.get("error_code")
+    return code == 429 or (isinstance(code, int) and code >= 500)
+
+
+def _send_broadcast_message(user_id, text):
+    result = send_message(user_id, text)
+    if isinstance(result, dict) and result.get("ok"):
+        return result, False
+    if not _retryable_api_failure(result):
+        return result if isinstance(result, dict) else {"ok": False}, False
+    parameters = result.get("parameters") if isinstance(result, dict) else None
+    parameters = parameters or {}
+    retry_after = parameters.get("retry_after", 1)
+    try:
+        delay = max(1, min(int(retry_after), 60))
+    except (TypeError, ValueError):
+        delay = 1
+    time.sleep(delay)
+    retried_result = send_message(user_id, text)
+    return (retried_result if isinstance(retried_result, dict) else {"ok": False}), True
+
+
 def admin_contact(lang):
     return config.ADMIN_USERNAME or t("admin_contact_fallback", lang)
+
+
+def _clean_text(value, minimum, maximum, require_letter=False):
+    value = value.strip()
+    if not minimum <= len(value) <= maximum or any(ord(char) < 32 for char in value):
+        raise ValueError("Матн дарозии дуруст надорад.")
+    if require_letter and not any(char.isalpha() for char in value):
+        raise ValueError("Матн бояд ҳадди ақал як ҳарф дошта бошад.")
+    return value
+
+
+def _parse_weight(value):
+    value = value.strip().replace(",", ".")
+    if len(value) > 16 or not re.fullmatch(r"[0-9]{1,6}(?:\.[0-9]{1,3})?", value):
+        raise ValueError("Вазн бояд рақами мусбат бошад, масалан 12.5.")
+    try:
+        weight = Decimal(value)
+    except InvalidOperation:
+        raise ValueError("Вазни нодуруст.") from None
+    if not weight.is_finite() or weight <= 0 or weight > Decimal("100000"):
+        raise ValueError("Вазн бояд аз 0 зиёд ва на бештар аз 100000 кг бошад.")
+    return weight
+
+
+def _parse_price(value):
+    amount_minor = parse_money(str(value))
+    if amount_minor > 100_000_000:
+        raise ValueError("Нархи 1 кг аз ҳадди иҷозатшуда зиёд аст.")
+    return Decimal(amount_minor) / Decimal(100)
+
+
+def _decimal_text(value, places=2):
+    quantum = Decimal(1).scaleb(-places)
+    rounded = value.quantize(quantum, rounding=ROUND_HALF_UP)
+    return format(rounded, f".{places}f").rstrip("0").rstrip(".") or "0"
+
+
+def _has_supported_media(message):
+    return any(key in message for key in (
+        "photo", "video", "document", "audio", "voice", "video_note", "animation", "sticker"
+    ))
 
 
 def track_status_display(track, lang):
@@ -124,6 +231,67 @@ def show_main_menu(chat_id, user_id, text_key="main_menu"):
     send_message(chat_id, t(text_key, lang), kb.main_menu_reply(lang, is_admin(user_id)))
 
 
+def handle_main_menu_button(chat_id, user_id, text, lang):
+    """Handle reply-keyboard navigation before interpreting text as state input."""
+    if text in (t("btn_instagram", lang), "/instagram"):
+        clear_state(user_id)
+        show_instagram(chat_id, lang)
+        return True
+
+    if text == t("btn_search_track", lang):
+        clear_state(user_id)
+        set_state(user_id, "search_track")
+        send_message(chat_id, t("ask_track_code", lang))
+        return True
+
+    if text == t("btn_my_tracks", lang):
+        clear_state(user_id)
+        tracks = db.user_tracks(user_id)
+        if not tracks:
+            send_message(chat_id, t("my_tracks_empty", lang))
+        else:
+            send_message(chat_id, t("my_tracks_title", lang))
+            for track in tracks:
+                send_message(chat_id, format_track(track, lang))
+        return True
+
+    if text == t("btn_forbidden", lang):
+        clear_state(user_id)
+        content = db.get_setting(f"forbidden_items_{lang}", db.get_setting("forbidden_items_tj"))
+        send_message(chat_id, "⛔ " + content)
+        return True
+
+    if text == t("btn_calc", lang):
+        clear_state(user_id)
+        set_state(user_id, "calc_kg")
+        send_message(chat_id, t("calc_ask_kg", lang))
+        return True
+
+    if text == t("btn_warehouse", lang):
+        clear_state(user_id)
+        content = db.get_setting(f"warehouse_address_{lang}", db.get_setting("warehouse_address_tj"))
+        send_message(chat_id, content)
+        return True
+
+    if text == t("btn_contact_admin", lang):
+        clear_state(user_id)
+        set_state(user_id, "contact_admin_msg")
+        send_message(chat_id, t("contact_admin_intro", lang))
+        return True
+
+    if text == t("btn_delivery", lang):
+        clear_state(user_id)
+        start_delivery(chat_id, user_id)
+        return True
+
+    if text == t("btn_language", lang):
+        clear_state(user_id)
+        send_message(chat_id, t("choose_language", lang), kb.language_inline_kb())
+        return True
+
+    return False
+
+
 # ============ Registration flow ============
 
 def start_registration(chat_id, user_id, username):
@@ -136,14 +304,28 @@ def start_registration(chat_id, user_id, username):
 def handle_contact(message, user_id):
     contact = message.get("contact")
     if not contact:
-        return
-    phone = contact.get("phone_number", "")
-    set_state(user_id, "reg_wait_name", {"phone": phone})
+        return False
     lang = lang_of(user_id)
+    contact_user_id = contact.get("user_id")
+    try:
+        contact_user_id = int(contact_user_id)
+    except (TypeError, ValueError):
+        contact_user_id = None
+    if contact_user_id != user_id:
+        send_message(message["chat"]["id"], t("contact_own_only", lang), kb.contact_request_kb(lang))
+        return False
+    try:
+        phone = normalize_phone(contact.get("phone_number", ""))
+    except ValueError:
+        send_message(message["chat"]["id"], t("contact_invalid", lang), kb.contact_request_kb(lang))
+        return False
+    set_state(user_id, "reg_wait_name", {"phone": phone})
     send_message(message["chat"]["id"], t("ask_name", lang))
+    return True
 
 
 def finish_registration(chat_id, user_id, name, phone):
+    name = _clean_text(name, 2, 100, require_letter=True)
     db.register_user(user_id, name, phone)
     lang = lang_of(user_id)
     send_message(chat_id, t("registered_ok", lang))
@@ -213,6 +395,19 @@ def start_delivery(chat_id, user_id):
     set_state(user_id, "delivery_track")
 
 
+def _valid_delivery_for_approval(delivery):
+    try:
+        code = normalize_track_code(delivery["track_code"])
+        if not db.get_track(code):
+            return False
+        _clean_text(delivery["address"], 5, 300)
+        _clean_text(delivery["name"], 2, 100, require_letter=True)
+        normalize_phone(delivery["phone"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    return True
+
+
 def process_delivery_step(message, user_id, state):
     chat_id = message["chat"]["id"]
     lang = lang_of(user_id)
@@ -227,24 +422,56 @@ def process_delivery_step(message, user_id, state):
         return
 
     if action == "delivery_track":
-        data["track_code"] = text.upper()
+        try:
+            code = normalize_track_code(text)
+        except ValueError:
+            send_message(chat_id, t("delivery_track_invalid", lang))
+            return
+        if not db.get_track(code):
+            send_message(chat_id, t("delivery_track_invalid", lang))
+            return
+        data["track_code"] = code
         set_state(user_id, "delivery_address", data)
         send_message(chat_id, t("delivery_ask_address", lang))
 
     elif action == "delivery_address":
-        data["address"] = text
+        try:
+            data["address"] = _clean_text(text, 5, 300)
+        except ValueError:
+            send_message(chat_id, t("delivery_address_invalid", lang))
+            return
         set_state(user_id, "delivery_name", data)
         send_message(chat_id, t("delivery_ask_name", lang))
 
     elif action == "delivery_name":
-        data["name"] = text
+        try:
+            data["name"] = _clean_text(text, 2, 100, require_letter=True)
+        except ValueError:
+            send_message(chat_id, t("delivery_name_invalid", lang))
+            return
         set_state(user_id, "delivery_phone", data)
         send_message(chat_id, t("delivery_ask_phone", lang))
 
     elif action == "delivery_phone":
-        data["phone"] = text
-        delivery_id = db.create_delivery(user_id, data["track_code"], data["address"],
-                                          data["name"], data["phone"])
+        try:
+            data["phone"] = normalize_phone(text)
+        except ValueError:
+            send_message(chat_id, t("delivery_phone_invalid", lang))
+            return
+        try:
+            delivery_id = db.create_delivery(user_id, data["track_code"], data["address"],
+                                              data["name"], data["phone"])
+        except db.DuplicateDeliveryError:
+            send_message(chat_id, t("delivery_duplicate", lang))
+            clear_state(user_id)
+            show_main_menu(chat_id, user_id)
+            return
+        except ValueError as error:
+            logger.warning("Delivery request rejected by validation: %s", type(error).__name__)
+            send_message(chat_id, t("delivery_request_invalid", lang))
+            clear_state(user_id)
+            show_main_menu(chat_id, user_id)
+            return
         payment_number = db.get_setting("payment_number", config.PAYMENT_NUMBER)
         send_message(chat_id, t("delivery_payment_instructions", lang, number=payment_number),
                      kb.paid_button_kb(lang, delivery_id))
@@ -257,49 +484,110 @@ def process_delivery_step(message, user_id, state):
 def process_calc(chat_id, user_id, text):
     lang = lang_of(user_id)
     try:
-        kg = float(text.replace(",", "."))
+        kg = _parse_weight(text)
     except ValueError:
         send_message(chat_id, t("calc_invalid", lang))
         return
-    price = float(db.get_setting("price_per_kg", config.DEFAULT_PRICE_PER_KG))
-    total = round(kg * price, 2)
-    send_message(chat_id, t("calc_result", lang, kg=kg, price=price, total=total))
+    try:
+        price = _parse_price(db.get_setting("price_per_kg", config.DEFAULT_PRICE_PER_KG))
+    except (ValueError, InvalidOperation):
+        send_message(chat_id, t("calc_unavailable", lang))
+        clear_state(user_id)
+        show_main_menu(chat_id, user_id)
+        return
+    total = (kg * price).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    send_message(chat_id, t("calc_result", lang,
+                            kg=_decimal_text(kg, 3), price=_decimal_text(price, 2),
+                            total=f"{total:.2f}"))
     clear_state(user_id)
     show_main_menu(chat_id, user_id)
 
 
 # ============ Contact admin (two-way chat) ============
 
+def _save_reply_mapping(admin_id, message_id, user_id):
+    if message_id is None:
+        return
+    key = (admin_id, message_id)
+    FORWARD_MAP[key] = user_id
+    db.save_admin_reply_mapping(admin_id, message_id, user_id)
+
+
 def process_contact_admin_msg(message, user_id):
     chat_id = message["chat"]["id"]
     lang = lang_of(user_id)
-    text = message.get("text", "")
-    u = db.get_user(user_id)
-    uname = f"@{u['username']}" if u and u["username"] else "-"
-    header = f"📩 Паём аз {u['full_name'] if u else user_id} ({uname})\nID: {user_id}\nТел: {u['phone'] if u else '-'}\n\n{text}"
+    text = message.get("text", "").strip()
+    has_media = _has_supported_media(message)
+    if not text and not has_media:
+        send_message(chat_id, t("contact_admin_invalid", lang))
+        return
+
+    user = db.get_user(user_id)
+    username = f"@{user['username']}" if user and user["username"] else "-"
+    header = (f"📩 Паём аз {user['full_name'] if user else user_id} ({username})\n"
+              f"ID: {user_id}\nТел: {user['phone'] if user else '-'}")
+    if text and not has_media:
+        header += f"\n\n{text}"
+
+    delivered = 0
     for admin_id in config.ADMIN_IDS:
-        res = send_message(admin_id, header)
-        msg_id = res.get("result", {}).get("message_id")
-        if msg_id:
-            FORWARD_MAP[(admin_id, msg_id)] = user_id
-    send_message(chat_id, t("contact_admin_sent", lang))
-    clear_state(user_id)
-    show_main_menu(chat_id, user_id)
+        header_result = send_message(admin_id, header)
+        header_id = header_result.get("result", {}).get("message_id")
+        content_result = header_result if not has_media else {"ok": False}
+        if has_media and message.get("message_id") is not None:
+            content_result = api("copyMessage", {"chat_id": admin_id,
+                                                   "from_chat_id": chat_id,
+                                                   "message_id": message["message_id"]})
+        content_id = content_result.get("result", {}).get("message_id")
+        if has_media:
+            if content_result.get("ok") and content_id is not None:
+                _save_reply_mapping(admin_id, content_id, user_id)
+                delivered += 1
+            elif header_result.get("ok"):
+                send_message(admin_id, "❌ Медиаи корбар фиристода нашуд.")
+        elif header_result.get("ok") and header_id is not None:
+            _save_reply_mapping(admin_id, header_id, user_id)
+            delivered += 1
+
+    if delivered:
+        send_message(chat_id, t("contact_admin_sent", lang))
+        clear_state(user_id)
+        show_main_menu(chat_id, user_id)
+    else:
+        send_message(chat_id, t("contact_admin_unavailable", lang))
 
 
 def process_admin_reply(message, admin_id):
-    """Агар admin ба паёми forward-шуда reply кунад, ба корбар мефиристем."""
+    """Send an admin's text or media reply to the mapped user."""
     reply_to = message.get("reply_to_message")
     if not reply_to:
         return False
-    key = (admin_id, reply_to.get("message_id"))
+    message_id = reply_to.get("message_id")
+    key = (admin_id, message_id)
     target_user = FORWARD_MAP.get(key)
-    if not target_user:
+    if target_user is None:
+        target_user = db.get_admin_reply_target(admin_id, message_id)
+        if target_user is not None:
+            FORWARD_MAP[key] = target_user
+    if target_user is None:
         return False
+
     lang = lang_of(target_user)
-    text = message.get("text", "")
-    send_message(target_user, t("admin_reply_prefix", lang) + text)
-    send_message(admin_id, "✅ Ирсол шуд.")
+    text = message.get("text", "").strip()
+    if text:
+        result = send_message(target_user, t("admin_reply_prefix", lang) + text)
+    elif message.get("message_id") is not None:
+        send_message(target_user, t("admin_reply_prefix", lang).rstrip())
+        result = api("copyMessage", {"chat_id": target_user,
+                                     "from_chat_id": admin_id,
+                                     "message_id": message["message_id"]})
+    else:
+        send_message(admin_id, "❌ Ин навъи паёмро фиристода натавонистам.")
+        return True
+    if result.get("ok"):
+        send_message(admin_id, "✅ Ирсол шуд.")
+    else:
+        send_message(admin_id, "❌ Паём фиристода нашуд. Боз кӯшиш кунед.")
     return True
 
 
@@ -847,6 +1135,10 @@ def handle_admin_callback(callback, admin_id):
             answer_callback(cq_id, "Дархост ёфт нашуд.")
             return
         status = "confirmed" if data.startswith("delok_") else "rejected"
+        if status == "confirmed" and not _valid_delivery_for_approval(d):
+            answer_callback(cq_id, "Дархост маълумоти дуруст надорад; тасдиқ манъ аст.", True)
+            send_message(chat_id, f"❌ Дархости #{delivery_id}: трек ё маълумоти муштарӣ нодуруст/кӯҳна аст. Пеш аз тасдиқ бо муштарӣ санҷед.")
+            return
         if not db.set_delivery_status(delivery_id, status, expected_status="pending_review"):
             answer_callback(cq_id, "Ин дархост аллакай баррасӣ шудааст.", True)
             return
@@ -903,13 +1195,28 @@ def handle_admin_text_state(message, admin_id, state):
         clear_state(admin_id)
 
     elif action == "adm_broadcast_input":
+        body = text.strip()
+        if not body or len(("📢 " + body).encode("utf-16-le")) // 2 > 3500:
+            send_message(chat_id, "❌ Паём холӣ ё аз ҳад дароз аст (то 3500 аломати Telegram). Боз нависед ё /cancel.")
+            return
         users = db.all_registered_users()
         sent = 0
-        for u in users:
-            send_message(u["user_id"], f"📢 {text}")
-            sent += 1
+        retried = 0
+        failed = []
+        for user in users:
+            result, was_retried = _send_broadcast_message(user["user_id"], f"📢 {body}")
+            retried += int(was_retried)
+            if result.get("ok"):
+                sent += 1
+            else:
+                failed.append(user["user_id"])
             time.sleep(0.05)
-        send_message(chat_id, f"✅ Ба {sent} корбар фиристода шуд.")
+        summary = f"📣 Натиҷа: муваффақ {sent}/{len(users)}; ноком {len(failed)}; такрор {retried}."
+        if failed:
+            summary += "\nID-ҳои ноком: " + ", ".join(str(user_id) for user_id in failed[:50])
+            if len(failed) > 50:
+                summary += f" … ва боз {len(failed) - 50} корбар."
+        send_long_message(chat_id, summary)
         clear_state(admin_id)
 
     elif action == "adm_edit_forbidden_input":
@@ -924,12 +1231,15 @@ def handle_admin_text_state(message, admin_id, state):
 
     elif action == "adm_edit_price_input":
         try:
-            float(text.replace(",", "."))
-            db.set_setting("price_per_kg", text.replace(",", "."))
-            send_message(chat_id, "✅ Нарх нав карда шуд.")
-        except ValueError:
-            send_message(chat_id, "❌ Рақами нодуруст.")
+            price_minor = parse_money(text)
+            if price_minor > 100_000_000:
+                raise ValueError("Нархи 1 кг аз 1 000 000 сомонӣ зиёд буда наметавонад.")
+        except ValueError as error:
+            send_message(chat_id, f"❌ {error}\nНархро дар сомонӣ нависед, масалан: 25 ё 25.50.\n/cancel — бекор кардан.")
+            return
+        db.set_setting("price_per_kg", format_money(price_minor))
         clear_state(admin_id)
+        send_message(chat_id, "✅ Нарх нав карда шуд.")
 
 
 # ============ Callback query dispatcher ============
@@ -942,6 +1252,12 @@ def handle_callback_query(callback):
     chat_id = chat.get("id")
     if chat_id != user_id or chat.get("type", "private") != "private":
         answer_callback(cq_id, "Ботро дар чати хусусӣ истифода баред.", True)
+        return
+
+    user = db.get_user(user_id)
+    if user and user["banned"] and not is_admin(user_id):
+        clear_state(user_id)
+        answer_callback(cq_id, t("user_banned", lang_of(user_id)), True)
         return
 
     if data.startswith("lang_"):
@@ -979,7 +1295,8 @@ def handle_callback_query(callback):
         admin_text = (f"🚚 Дархости доставка #{delivery_id}\n"
                        f"Трек: {d['track_code']}\nНом: {d['name']}\nТел: {d['phone']}\n"
                        f"Адрес: {d['address']}\nКорбар: {u['full_name'] if u else user_id}\n\n"
-                       f"Пардохт ба {db.get_setting('payment_number', config.PAYMENT_NUMBER)} гуфта шудааст. Санҷед.")
+                       f"Пардохт ба {db.get_setting('payment_number', config.PAYMENT_NUMBER)} гуфта шудааст. Санҷед.\n"
+                       "⚠️ Моликияти трек автоматӣ санҷида намешавад; шахсияти дархосткунанда ва пардохтро тасдиқ кунед.")
         notify_admins(admin_text, kb.admin_delivery_review_kb(delivery_id))
         return
 
@@ -1007,6 +1324,10 @@ def handle_message(message):
 
     db.upsert_user_basic(user_id, username)
     u = db.get_user(user_id)
+    if u and u["banned"] and not is_admin(user_id):
+        clear_state(user_id)
+        send_message(chat_id, t("user_banned", lang_of(user_id)))
+        return
 
     # --- admin reply-to-forwarded-message shortcut ---
     if is_admin(user_id) and message.get("reply_to_message"):
@@ -1042,12 +1363,38 @@ def handle_message(message):
             show_customers(chat_id)
         return
 
+    if is_admin(user_id) and (text == "/ban" or text.startswith("/ban ")
+                              or text == "/unban" or text.startswith("/unban ")):
+        parts = text.split(maxsplit=1)
+        command = parts[0]
+        if len(parts) != 2 or not parts[1].isdigit():
+            send_message(chat_id, "Формат: /ban USER_ID ё /unban USER_ID")
+            return
+        target_user_id = int(parts[1])
+        if target_user_id in config.ADMIN_IDS:
+            send_message(chat_id, "Админро манъ ё аз манъ озод кардан мумкин нест.")
+            return
+        if not db.get_user(target_user_id):
+            send_message(chat_id, "Ин корбар дар база ёфт нашуд.")
+            return
+        banned = command == "/ban"
+        db.set_banned(target_user_id, banned)
+        if banned:
+            clear_state(target_user_id)
+        send_message(chat_id, f"✅ Корбар {target_user_id} {'манъ' if banned else 'аз манъ озод'} шуд.")
+        return
+
     if text in ("/cancel", t("btn_cancel", lang_of(user_id))):
         clear_state(user_id)
         show_main_menu(chat_id, user_id, "cancel")
         return
 
     state = get_state(user_id)
+    if u and u["registered"]:
+        lang = lang_of(user_id)
+        if handle_main_menu_button(chat_id, user_id, text, lang):
+            return
+
     if is_admin(user_id) and state and state["action"].startswith("adm_"):
         handle_admin_text_state(message, user_id, state)
         return
@@ -1058,7 +1405,12 @@ def handle_message(message):
             return
         state = get_state(user_id)
         if state and state["action"] == "reg_wait_name":
-            finish_registration(chat_id, user_id, text, state["data"].get("phone", ""))
+            try:
+                name = _clean_text(text, 2, 100, require_letter=True)
+            except ValueError:
+                send_message(chat_id, t("name_invalid", lang_of(user_id)))
+                return
+            finish_registration(chat_id, user_id, name, state["data"].get("phone", ""))
             return
         lang = lang_of(user_id)
         send_message(chat_id, t("not_registered", lang))
@@ -1066,10 +1418,6 @@ def handle_message(message):
         return
 
     lang = lang_of(user_id)
-    if text in (t("btn_instagram", lang), "/instagram"):
-        clear_state(user_id)
-        show_instagram(chat_id, lang)
-        return
     state = get_state(user_id)
 
     # --- state machine (registered users) ---
@@ -1098,54 +1446,6 @@ def handle_message(message):
             process_delivery_step(message, user_id, state)
             return
 
-    # --- reply keyboard buttons ---
-    if text == t("btn_search_track", lang):
-        set_state(user_id, "search_track")
-        send_message(chat_id, t("ask_track_code", lang))
-        return
-
-    if text == t("btn_my_tracks", lang):
-        tracks = db.user_tracks(user_id)
-        if not tracks:
-            send_message(chat_id, t("my_tracks_empty", lang))
-        else:
-            send_message(chat_id, t("my_tracks_title", lang))
-            for tr in tracks:
-                send_message(chat_id, format_track(tr, lang))
-        return
-
-    if text == t("btn_forbidden", lang):
-        content = db.get_setting(f"forbidden_items_{lang}", db.get_setting("forbidden_items_tj"))
-        send_message(chat_id, "⛔ " + content)
-        return
-
-    if text == t("btn_calc", lang):
-        set_state(user_id, "calc_kg")
-        send_message(chat_id, t("calc_ask_kg", lang))
-        return
-
-    if text == t("btn_warehouse", lang):
-        content = db.get_setting(f"warehouse_address_{lang}", db.get_setting("warehouse_address_tj"))
-        send_message(chat_id, content)
-        return
-
-    if text == t("btn_contact_admin", lang):
-        set_state(user_id, "contact_admin_msg")
-        send_message(chat_id, t("contact_admin_intro", lang))
-        return
-
-    if text == t("btn_delivery", lang):
-        start_delivery(chat_id, user_id)
-        return
-
-    if text == t("btn_language", lang):
-        send_message(chat_id, t("choose_language", lang), kb.language_inline_kb())
-        return
-
-    if text == "⚙️ Admin Panel" and is_admin(user_id):
-        open_admin_panel(chat_id)
-        return
-
     # --- default: treat as track code search ---
     if text and not text.startswith("/"):
         do_track_search(chat_id, user_id, text)
@@ -1157,6 +1457,13 @@ def handle_message(message):
 def main():
     if not config.BOT_TOKEN:
         raise SystemExit("BOT_TOKEN танзим нашудааст. Онро дар Variables гузоред.")
+    if not config.ADMIN_IDS:
+        raise SystemExit("ADMIN_IDS танзим нашудааст. Ақаллан як Telegram ID-и админро гузоред.")
+    try:
+        _parse_price(config.DEFAULT_PRICE_PER_KG)
+    except (ValueError, InvalidOperation) as error:
+        raise SystemExit("PRICE_PER_KG бояд маблағи мусбати дуруст бошад.") from error
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     print(f"{config.BOT_NAME} BOT — старт...")
     db.init_db()
     # Update the Telegram display name too; the @username stays unchanged.
@@ -1168,13 +1475,13 @@ def main():
         try:
             updates = get_updates(offset)
             for upd in updates:
-                offset = upd["update_id"] + 1
                 if "message" in upd:
                     handle_message(upd["message"])
                 elif "callback_query" in upd:
                     handle_callback_query(upd["callback_query"])
-        except Exception as e:
-            print(f"[LOOP ERROR] {e}")
+                offset = upd["update_id"] + 1
+        except Exception as error:
+            logger.error("Polling loop error: %s", type(error).__name__)
             time.sleep(3)
 
 

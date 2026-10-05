@@ -220,8 +220,10 @@ class CargoTests(DatabaseTestCase):
     def test_delivery_counts_are_separate_from_parcels_and_accounts(self):
         cid = self.add_customer()
         self.post(cid, 'charge', 15000)
-        for status in ['waiting_payment', 'pending_review', 'confirmed', 'rejected']:
-            did = db.create_delivery(111, 'TEST', 'Address', 'Name', 'Phone')
+        self.add_track('TEST')
+        for index, status in enumerate(['waiting_payment', 'pending_review', 'confirmed', 'rejected']):
+            did = db.create_delivery(111 + index, 'TEST', '123 Main Street', f'Name {index}',
+                                     f'+99290123456{index}')
             db.set_delivery_status(did, status)
         stats = db.get_statistics()
         self.assertEqual(stats['deliveries_total'], 4)
@@ -230,12 +232,31 @@ class CargoTests(DatabaseTestCase):
         self.assertEqual(stats['total_payments'], 0)
 
     def test_conditional_delivery_status_updates(self):
-        did = db.create_delivery(111, 'TEST', 'Address', 'Name', 'Phone')
+        self.add_track('TEST')
+        did = db.create_delivery(111, 'TEST', '123 Main Street', 'Test Name', '+992901234567')
         self.assertFalse(db.set_delivery_status(did, 'confirmed', 'pending_review'))
         self.assertTrue(db.set_delivery_status(did, 'pending_review', 'waiting_payment'))
         self.assertTrue(db.set_delivery_status(did, 'confirmed', 'pending_review'))
         self.assertFalse(db.set_delivery_status(did, 'rejected', 'pending_review'))
         self.assertEqual(db.get_delivery(did)['status'], 'confirmed')
+
+    def test_delivery_validation_and_duplicate_protection(self):
+        self.add_track('TEST1')
+        with self.assertRaises(ValueError):
+            db.create_delivery(111, '77', '123 Main Street', 'Test Name', '+992901234567')
+        with self.assertRaises(ValueError):
+            db.create_delivery(111, 'TEST1', '77', 'Test Name', '+992901234567')
+        with self.assertRaises(ValueError):
+            db.create_delivery(111, 'TEST1', '123 Main Street', '77', '+992901234567')
+        with self.assertRaises(ValueError):
+            db.create_delivery(111, 'TEST1', '123 Main Street', 'Test Name', '77')
+
+        did = db.create_delivery(111, 'TEST1', '123 Main Street', 'Test Name', '+992901234567')
+        with self.assertRaises(db.DuplicateDeliveryError):
+            db.create_delivery(111, 'TEST1', '123 Main Street', 'Test Name', '+992901234567')
+        db.set_delivery_status(did, 'rejected')
+        self.assertIsInstance(db.create_delivery(111, 'TEST1', '123 Main Street', 'Test Name',
+                                                 '+992901234567'), int)
 
 
 class MigrationTests(DatabaseTestCase):

@@ -65,6 +65,15 @@ class BotTests(DatabaseTestCase):
                 bot.main()
         self.assertEqual(self.calls, [])
 
+    def test_failed_update_is_retried_before_offset_advances(self):
+        with patch.object(config, 'BOT_TOKEN', 'test-placeholder'), \
+                patch.object(bot, 'get_updates', side_effect=[[{'update_id': 5, 'message': {}}], KeyboardInterrupt]) as updates, \
+                patch.object(bot, 'handle_message', side_effect=RuntimeError('temporary failure')), \
+                patch.object(bot.time, 'sleep'), patch('builtins.print'):
+            with self.assertRaises(KeyboardInterrupt):
+                bot.main()
+        self.assertEqual([call.args[0] for call in updates.call_args_list], [0, 0])
+
     def test_startup_requests_tezcargo_display_name(self):
         with patch.object(config, 'BOT_TOKEN', 'test-placeholder'), \
                 patch.object(bot, 'get_updates', side_effect=KeyboardInterrupt), \
@@ -85,6 +94,40 @@ class BotTests(DatabaseTestCase):
         self.assertIsNone(bot.get_state(USER))
         buttons = [text for row in self.calls[-1][1]['reply_markup']['keyboard'] for text in row]
         self.assertIn(t('btn_instagram', 'tj'), buttons)
+
+    def test_main_menu_buttons_preempt_active_search_and_contact_states(self):
+        self.register()
+        bot.set_state(USER, 'search_track')
+        before = len(self.calls)
+        self.message(t('btn_my_tracks', 'tj'), USER)
+        new_texts = self.sent_texts()[before:]
+        self.assertIn(t('my_tracks_empty', 'tj'), new_texts)
+        self.assertNotIn(t('track_not_found', 'tj', admin=bot.admin_contact('tj')), new_texts)
+        self.assertIsNone(bot.get_state(USER))
+        self.assertEqual(db.get_statistics()['searches'], 0)
+
+        bot.set_state(USER, 'contact_admin_msg')
+        self.message(t('btn_search_track', 'tj'), USER)
+        self.assertEqual(bot.get_state(USER)['action'], 'search_track')
+        self.assertIn(t('ask_track_code', 'tj'), self.sent_texts())
+        self.assertFalse(any('Паём аз ' in value for value in self.sent_texts()))
+        self.assertFalse(any(params.get('chat_id') in config.ADMIN_IDS and method == 'sendMessage'
+                             for method, params, _ in self.calls))
+
+    def test_registration_rejects_another_users_contact_and_bad_name(self):
+        self.message('/start', USER)
+        bot.handle_message({'from': {'id': USER}, 'chat': {'id': USER, 'type': 'private'},
+                            'contact': {'user_id': USER + 1, 'phone_number': '+992901234567'}})
+        self.assertEqual(bot.get_state(USER)['action'], 'reg_wait_contact')
+        self.assertEqual(db.get_user(USER)['registered'], 0)
+
+        bot.handle_message({'from': {'id': USER}, 'chat': {'id': USER, 'type': 'private'},
+                            'contact': {'user_id': USER, 'phone_number': '+992901234567'}})
+        self.message('77', USER)
+        self.assertEqual(bot.get_state(USER)['action'], 'reg_wait_name')
+        self.assertEqual(db.get_user(USER)['registered'], 0)
+        self.message('Али Раҳимов', USER)
+        self.assertEqual(db.get_user(USER)['registered'], 1)
 
     def test_branding_and_instagram_button_in_all_languages(self):
         for lang in ('tj', 'ru', 'en'):
@@ -347,7 +390,8 @@ class BotTests(DatabaseTestCase):
 
     def test_payment_callback_checks_ownership_and_cannot_reopen_confirmed_delivery(self):
         self.register()
-        did = db.create_delivery(USER, 'TEST1', 'Address', 'Tester', 'Phone')
+        self.add_track('TEST1')
+        did = db.create_delivery(USER, 'TEST1', '123 Main Street', 'Tester', '+992901234567')
         self.callback(f'paid_{did}', 222)
         self.assertEqual(db.get_delivery(did)['status'], 'waiting_payment')
         self.callback(f'paid_{did}', USER)
@@ -359,6 +403,172 @@ class BotTests(DatabaseTestCase):
         self.assertEqual(db.get_delivery(did)['status'], 'confirmed')
         self.assertEqual(db.get_statistics()['collected'], 0)
         self.assertEqual(db.get_statistics()['total_payments'], 0)
+
+    def test_banned_users_are_blocked_from_messages_and_callbacks(self):
+        self.register()
+        db.set_banned(USER, True)
+        self.message(t('btn_search_track', 'tj'), USER)
+        self.assertIn(t('user_banned', 'tj'), self.sent_texts())
+        self.assertIsNone(bot.get_state(USER))
+        self.callback('lang_en', USER)
+        self.assertEqual(db.get_language(USER), 'tj')
+
+    def test_admin_ban_commands_enforce_and_remove_restrictions(self):
+        self.register(USER)
+        self.message(f'/ban {USER}')
+        self.assertEqual(db.get_user(USER)['banned'], 1)
+        self.message(f'/unban {USER}')
+        self.assertEqual(db.get_user(USER)['banned'], 0)
+        self.message(f'/ban {ADMIN}')
+        self.assertEqual(db.get_user(ADMIN)['banned'], 0)
+
+    def test_delivery_flow_rejects_invalid_fields_and_duplicate_requests(self):
+        self.register()
+        self.add_track('TRACK1')
+        self.message(t('btn_delivery', 'tj'), USER)
+        self.message('77', USER)
+        self.assertEqual(bot.get_state(USER)['action'], 'delivery_track')
+        self.assertEqual(db.get_statistics()['deliveries_total'], 0)
+
+        self.message('TRACK1', USER)
+        self.assertEqual(bot.get_state(USER)['action'], 'delivery_address')
+        self.message('77', USER)
+        self.assertEqual(bot.get_state(USER)['action'], 'delivery_address')
+        self.message('123 Main Street', USER)
+        self.assertEqual(bot.get_state(USER)['action'], 'delivery_name')
+        self.message('77', USER)
+        self.assertEqual(bot.get_state(USER)['action'], 'delivery_name')
+        self.message('Test Name', USER)
+        self.assertEqual(bot.get_state(USER)['action'], 'delivery_phone')
+        self.message('77', USER)
+        self.assertEqual(bot.get_state(USER)['action'], 'delivery_phone')
+        self.message('+992901234567', USER)
+        self.assertIsNone(bot.get_state(USER))
+        self.assertEqual(db.get_statistics()['deliveries_total'], 1)
+        delivery = db.get_delivery(1)
+        self.assertEqual(delivery['track_code'], 'TRACK1')
+        self.assertEqual(delivery['phone'], '+992901234567')
+
+        self.message(t('btn_delivery', 'tj'), USER)
+        self.message('TRACK1', USER)
+        self.message('123 Main Street', USER)
+        self.message('Test Name', USER)
+        self.message('+992901234567', USER)
+        self.assertEqual(db.get_statistics()['deliveries_total'], 1)
+        self.assertIn(t('delivery_duplicate', 'tj'), self.sent_texts())
+
+    def test_calculator_rejects_non_positive_and_non_finite_values(self):
+        self.register()
+        for value in ['0', '-1', 'NaN', 'Infinity', '1e309']:
+            bot.set_state(USER, 'calc_kg')
+            self.message(value, USER)
+            self.assertEqual(bot.get_state(USER)['action'], 'calc_kg')
+        self.assertEqual(db.get_statistics()['searches'], 0)
+
+        db.set_setting('price_per_kg', 'NaN')
+        bot.set_state(USER, 'calc_kg')
+        self.message('2', USER)
+        self.assertIsNone(bot.get_state(USER))
+        self.assertIn(t('calc_unavailable', 'tj'), self.sent_texts())
+
+    def test_price_editor_keeps_state_until_valid_positive_price(self):
+        old_price = db.get_setting('price_per_kg')
+        self.callback('adm_edit_price')
+        for value in ['NaN', 'Infinity', '-5', '0', '25.555']:
+            self.message(value)
+            self.assertEqual(bot.get_state(ADMIN)['action'], 'adm_edit_price_input')
+            self.assertEqual(db.get_setting('price_per_kg'), old_price)
+        self.message('29.50')
+        self.assertEqual(db.get_setting('price_per_kg'), '29.50')
+        self.assertIsNone(bot.get_state(ADMIN))
+
+    def test_persistent_state_and_admin_reply_mapping_survive_cache_reset(self):
+        self.register()
+        bot.set_state(USER, 'calc_kg', {'example': 'kept'})
+        bot.USER_STATE.clear()
+        self.assertEqual(bot.get_state(USER), {'action': 'calc_kg', 'data': {'example': 'kept'}})
+
+        db.save_admin_reply_mapping(ADMIN, 7654, USER)
+        bot.FORWARD_MAP.clear()
+        bot.handle_message({'from': {'id': ADMIN}, 'chat': {'id': ADMIN, 'type': 'private'},
+                            'reply_to_message': {'message_id': 7654}, 'text': 'Салом'})
+        self.assertTrue(any(params.get('chat_id') == USER and 'Салом' in params.get('text', '')
+                            for method, params, _ in self.calls if method == 'sendMessage'))
+
+    def test_contact_admin_forwards_media_and_supports_admin_media_reply(self):
+        self.register()
+        bot.set_state(USER, 'contact_admin_msg')
+        bot.handle_message({'from': {'id': USER}, 'chat': {'id': USER, 'type': 'private'},
+                            'message_id': 50, 'photo': [{'file_id': 'photo-id'}]})
+        copy_calls = [params for method, params, _ in self.calls if method == 'copyMessage']
+        self.assertTrue(copy_calls)
+        forwarded_id = next(message_id for (admin_id, message_id), value in bot.FORWARD_MAP.items()
+                            if admin_id == ADMIN and value == USER)
+
+        bot.handle_message({'from': {'id': ADMIN}, 'chat': {'id': ADMIN, 'type': 'private'},
+                            'message_id': 60, 'reply_to_message': {'message_id': forwarded_id},
+                            'photo': [{'file_id': 'reply-photo'}]})
+        self.assertTrue(any(method == 'copyMessage' and params.get('chat_id') == USER
+                            for method, params, _ in self.calls))
+
+    def test_broadcast_reports_real_failures_and_retries_transient_errors(self):
+        self.register(USER)
+        second_user = 222
+        self.register(second_user)
+        attempts = {USER: 0, second_user: 0}
+        sent_messages = []
+
+        def fake_send(chat_id, text, reply_markup=None):
+            sent_messages.append((chat_id, text))
+            if chat_id in attempts:
+                attempts[chat_id] += 1
+                if chat_id == USER and attempts[chat_id] == 1:
+                    return {'ok': False, 'retryable': True}
+                if chat_id == second_user:
+                    return {'ok': False, 'error_code': 403, 'description': 'blocked'}
+            return {'ok': True, 'result': {'message_id': 900}}
+
+        self.callback('adm_broadcast')
+        with patch.object(bot, 'send_message', side_effect=fake_send), patch.object(bot.time, 'sleep'):
+            self.message('Эълони санҷишӣ')
+        self.assertEqual(attempts, {USER: 2, second_user: 1})
+        summary = next(text for chat_id, text in reversed(sent_messages)
+                       if chat_id == ADMIN and 'Натиҷа:' in text)
+        self.assertIn('муваффақ 1/2', summary)
+        self.assertIn('ноком 1', summary)
+        self.assertIn(str(second_user), summary)
+
+    def test_api_returns_structured_http_errors(self):
+        class Response:
+            ok = False
+            status_code = 400
+
+            @staticmethod
+            def json():
+                return {'ok': False, 'error_code': 400, 'description': 'Bad Request'}
+
+        self.api_patch.stop()
+        try:
+            with patch('bot.requests.post', return_value=Response()):
+                result = bot.api('sendMessage', {'chat_id': USER, 'text': 'test'})
+        finally:
+            self.api_patch.start()
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['error_code'], 400)
+        self.assertEqual(result['description'], 'Bad Request')
+
+    def test_admin_cannot_confirm_legacy_delivery_with_invalid_details(self):
+        self.register()
+        with db.get_conn() as conn:
+            cursor = conn.execute("""INSERT INTO deliveries
+                (user_id, track_code, address, name, phone, status, created_at)
+                VALUES (?, '77', '77', '77', '77', 'pending_review', ?)""", (USER, db.now()))
+            delivery_id = cursor.lastrowid
+        self.callback(f'delok_{delivery_id}')
+        self.assertEqual(db.get_delivery(delivery_id)['status'], 'pending_review')
+        alerts = [params['text'] for method, params, _ in self.calls
+                  if method == 'answerCallbackQuery' and params.get('text')]
+        self.assertIn('тасдиқ манъ аст', alerts[-1])
 
     def test_malformed_callbacks_are_safe(self):
         for data in ['paid_no', 'paid_99999', 'delok_no', 'adm_customer_no',
