@@ -31,7 +31,12 @@ DEFAULT_ARRIVAL_CITY = os.environ.get("DEFAULT_ARRIVAL_CITY", "Истаравш�
 DEFAULT_ESTIMATED_DAYS = os.environ.get("DEFAULT_ESTIMATED_DAYS", "20-25 рӯз")
 
 # Баъд аз чанд рӯз статус ба таври худкор ба "Дар роҳ" иваз шавад
-AUTO_STATUS_DAYS = int(os.environ.get("AUTO_STATUS_DAYS", "10"))
+try:
+    AUTO_STATUS_DAYS = int(os.environ.get("AUTO_STATUS_DAYS", "10"))
+except ValueError as error:
+    raise ValueError("AUTO_STATUS_DAYS бояд рақами бутуни мусбат бошад.") from error
+if not 1 <= AUTO_STATUS_DAYS <= 3650:
+    raise ValueError("AUTO_STATUS_DAYS бояд аз 1 то 3650 бошад.")
 
 DB_PATH = os.environ.get("DB_PATH", "cargo_bot.db")
 

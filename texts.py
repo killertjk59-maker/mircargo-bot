@@ -22,6 +22,26 @@ T = {
         "ru": "📱 Отправить номер телефона",
         "en": "📱 Share phone number",
     },
+    "contact_own_only": {
+        "tj": "❌ Лутфан рақами телефони худатонро бо тугмаи поён фиристед.",
+        "ru": "❌ Отправьте свой номер телефона с помощью кнопки ниже.",
+        "en": "❌ Please share your own phone number using the button below.",
+    },
+    "contact_invalid": {
+        "tj": "❌ Рақами телефон нодуруст аст. Боз бо тугмаи поён фиристед.",
+        "ru": "❌ Неверный номер телефона. Отправьте его ещё раз кнопкой ниже.",
+        "en": "❌ Invalid phone number. Please share it again using the button below.",
+    },
+    "name_invalid": {
+        "tj": "❌ Ном бояд аз 2 то 100 аломат дошта бошад ва ҳарф дарбар гирад. Боз нависед:",
+        "ru": "❌ Имя должно содержать от 2 до 100 символов и хотя бы одну букву. Попробуйте ещё раз:",
+        "en": "❌ Name must be 2–100 characters and contain a letter. Please try again:",
+    },
+    "user_banned": {
+        "tj": "⛔ Дастрасии шумо ба бот маҳдуд шудааст. Барои маълумот бо админ тамос гиред.",
+        "ru": "⛔ Доступ к боту ограничен. Свяжитесь с администратором.",
+        "en": "⛔ Your access to this bot is restricted. Please contact an administrator.",
+    },
     "ask_name": {
         "tj": "✏️ Лутфан ном ва насаби худро нависед:",
         "ru": "✏️ Пожалуйста, напишите ваше имя и фамилию:",
@@ -158,14 +178,29 @@ T = {
         "en": "💰 {kg} kg × {price} TJS = {total} TJS",
     },
     "calc_invalid": {
-        "tj": "❌ Лутфан рақами дуруст нависед.",
-        "ru": "❌ Пожалуйста, введите корректное число.",
-        "en": "❌ Please enter a valid number.",
+        "tj": "❌ Вазни мусбатро аз 0 то 100000 кг нависед (масалан: 12.5).",
+        "ru": "❌ Введите положительный вес от 0 до 100000 кг (например: 12.5).",
+        "en": "❌ Enter a positive weight up to 100000 kg (for example, 12.5).",
+    },
+    "calc_unavailable": {
+        "tj": "⚠️ Нархи ҳисоб нодуруст танзим шудааст. Лутфан бо админ тамос гиред.",
+        "ru": "⚠️ Цена настроена неверно. Пожалуйста, свяжитесь с администратором.",
+        "en": "⚠️ The price is configured incorrectly. Please contact an administrator.",
     },
     "contact_admin_intro": {
-        "tj": "💬 Паёми худро нависед, ман онро ба админ мефиристам:",
-        "ru": "💬 Напишите ваше сообщение, я передам его администратору:",
-        "en": "💬 Type your message and I'll forward it to the admin:",
+        "tj": "💬 Матн ё файли худро фиристед, ман онро ба админ мефиристам. /cancel — бекор кардан.",
+        "ru": "💬 Отправьте текст или файл, и я передам его администратору. /cancel — отмена.",
+        "en": "💬 Send a text or media file and I’ll forward it to an admin. /cancel — cancel.",
+    },
+    "contact_admin_invalid": {
+        "tj": "❌ Матн, акс ё файл фиристед, ё /cancel нависед.",
+        "ru": "❌ Отправьте текст, фото или файл либо напишите /cancel.",
+        "en": "❌ Send text, a photo, or a file, or type /cancel.",
+    },
+    "contact_admin_unavailable": {
+        "tj": "❌ Паём ба админҳо расонида нашуд. Баъдтар боз кӯшиш кунед.",
+        "ru": "❌ Не удалось доставить сообщение администраторам. Попробуйте позже.",
+        "en": "❌ The message could not be delivered to admins. Please try again later.",
     },
     "contact_admin_sent": {
         "tj": "✅ Паёми шумо ба админ фиристода шуд. Дар қарибӣ ҷавоб мегиред.",
@@ -196,6 +231,36 @@ T = {
         "tj": "📱 Рақами телефони худро нависед:",
         "ru": "📱 Напишите ваш номер телефона:",
         "en": "📱 Enter your phone number:",
+    },
+    "delivery_track_invalid": {
+        "tj": "❌ Трек-коди дурусти дар система мавҷудбударо нависед:",
+        "ru": "❌ Введите корректный трек-код, который есть в системе:",
+        "en": "❌ Enter a valid tracking code that exists in the system:",
+    },
+    "delivery_address_invalid": {
+        "tj": "❌ Адрес бояд аз 5 то 300 аломат бошад. Боз нависед:",
+        "ru": "❌ Адрес должен содержать от 5 до 300 символов. Попробуйте ещё раз:",
+        "en": "❌ Address must be 5–300 characters. Please try again:",
+    },
+    "delivery_name_invalid": {
+        "tj": "❌ Ном бояд аз 2 то 100 аломат ва ҳарф дошта бошад. Боз нависед:",
+        "ru": "❌ Имя должно содержать от 2 до 100 символов и букву. Попробуйте ещё раз:",
+        "en": "❌ Name must be 2–100 characters and contain a letter. Please try again:",
+    },
+    "delivery_phone_invalid": {
+        "tj": "❌ Рақами телефони дуруст нависед (масалан: +992901234567):",
+        "ru": "❌ Введите корректный номер (например: +992901234567):",
+        "en": "❌ Enter a valid phone number (for example, +992901234567):",
+    },
+    "delivery_duplicate": {
+        "tj": "⚠️ Барои ин трек дархости фаъол ё тасдиқшуда аллакай ҳаст. Дархости нав сохта нашуд.",
+        "ru": "⚠️ Для этого трека уже есть активная или подтверждённая заявка. Новая не создана.",
+        "en": "⚠️ An active or confirmed request already exists for this track. No duplicate was created.",
+    },
+    "delivery_request_invalid": {
+        "tj": "❌ Маълумоти дархост дигар дуруст нест. Аз меню дархостро аз нав оғоз кунед.",
+        "ru": "❌ Данные заявки больше недействительны. Начните заявку заново из меню.",
+        "en": "❌ The request details are no longer valid. Please start a new request from the menu.",
     },
     "delivery_payment_instructions": {
         "tj": "💳 Лутфан пардохтро ба рақами {number} гузаронед.\n\nПас аз пардохт, тугмаи поёнро пахш кунед:",

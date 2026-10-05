@@ -1,11 +1,16 @@
 import datetime
+import json
 import sqlite3
 import uuid
 
 import config
-from domain import lifecycle_from_status, normalize_phone
+from domain import lifecycle_from_status, normalize_phone, normalize_track_code
 
 _conn = None
+
+
+class DuplicateDeliveryError(ValueError):
+    pass
 
 
 def get_conn():
@@ -119,6 +124,21 @@ def init_db():
             status TEXT DEFAULT 'waiting_payment',
             created_at TEXT
         )""")
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS conversation_states (
+            user_id INTEGER PRIMARY KEY,
+            action TEXT NOT NULL,
+            data_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )""")
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS admin_reply_map (
+            admin_id INTEGER NOT NULL,
+            message_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (admin_id, message_id)
+        )""")
         conn.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_account_entries_customer ON account_entries(customer_id, id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_tracks_lifecycle ON tracks(cargo_status, archived)")
@@ -156,6 +176,55 @@ def set_setting(key, value):
     with conn:
         conn.execute("INSERT INTO settings (key, value) VALUES (?,?) "
                      "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
+
+
+# ---------- Persistent conversation context ----------
+
+def save_conversation_state(user_id, action, data):
+    data_json = json.dumps(data or {}, ensure_ascii=False, separators=(",", ":"))
+    conn = get_conn()
+    with conn:
+        conn.execute("""INSERT INTO conversation_states (user_id, action, data_json, updated_at)
+            VALUES (?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET
+            action=excluded.action, data_json=excluded.data_json, updated_at=excluded.updated_at""",
+                     (user_id, action, data_json, now()))
+
+
+def get_conversation_state(user_id):
+    row = get_conn().execute(
+        "SELECT action, data_json FROM conversation_states WHERE user_id=?", (user_id,)).fetchone()
+    if not row:
+        return None
+    try:
+        data = json.loads(row["data_json"])
+    except (TypeError, json.JSONDecodeError):
+        clear_conversation_state(user_id)
+        return None
+    if not isinstance(data, dict):
+        clear_conversation_state(user_id)
+        return None
+    return {"action": row["action"], "data": data}
+
+
+def clear_conversation_state(user_id):
+    conn = get_conn()
+    with conn:
+        conn.execute("DELETE FROM conversation_states WHERE user_id=?", (user_id,))
+
+
+def save_admin_reply_mapping(admin_id, message_id, user_id):
+    conn = get_conn()
+    with conn:
+        conn.execute("""INSERT INTO admin_reply_map (admin_id, message_id, user_id, created_at)
+            VALUES (?,?,?,?) ON CONFLICT(admin_id, message_id) DO UPDATE SET
+            user_id=excluded.user_id, created_at=excluded.created_at""",
+                     (admin_id, message_id, user_id, now()))
+
+
+def get_admin_reply_target(admin_id, message_id):
+    row = get_conn().execute("SELECT user_id FROM admin_reply_map WHERE admin_id=? AND message_id=?",
+                             (admin_id, message_id)).fetchone()
+    return row["user_id"] if row else None
 
 
 # ---------- Users ----------
@@ -420,11 +489,30 @@ def customer_entries(customer_id, limit=10):
 # ---------- Deliveries ----------
 
 def create_delivery(user_id, track_code, address, name, phone):
+    track_code = normalize_track_code(track_code)
+    if not get_track(track_code):
+        raise ValueError("Трек-код дар система ёфт нашуд.")
+
+    address = address.strip()
+    name = name.strip()
+    if len(address) < 5 or len(address) > 300 or any(ord(char) < 32 for char in address):
+        raise ValueError("Адрес бояд аз 5 то 300 аломати дуруст бошад.")
+    if (not 2 <= len(name) <= 100 or not any(char.isalpha() for char in name)
+            or any(ord(char) < 32 for char in name)):
+        raise ValueError("Ном бояд аз 2 то 100 аломат дошта бошад.")
+    phone = normalize_phone(phone)
+
     conn = get_conn()
     with conn:
+        existing = conn.execute("""SELECT id FROM deliveries
+            WHERE user_id=? AND track_code=?
+              AND status IN ('waiting_payment','pending_review','confirmed')
+            ORDER BY id DESC LIMIT 1""", (user_id, track_code)).fetchone()
+        if existing:
+            raise DuplicateDeliveryError(f"Барои ин трек дархости фаъол аллакай ҳаст (#{existing['id']}).")
         cursor = conn.execute("""INSERT INTO deliveries (user_id, track_code, address, name, phone, status, created_at)
                          VALUES (?,?,?,?,?, 'waiting_payment', ?)""",
-                              (user_id, track_code.upper(), address, name, phone, now()))
+                              (user_id, track_code, address, name, phone, now()))
     return cursor.lastrowid
 
 
